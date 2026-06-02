@@ -3,7 +3,7 @@
 set -euo pipefail
 
 # =====================================================
-# WARP + WireProxy Installer
+# WGCF + WireProxy Installer
 # =====================================================
 
 # --------------------------
@@ -407,36 +407,54 @@ fi
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=wireproxy WARP connection
-After=network.target
+After=network.target network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart=${WIREPROXY_BIN} -c ${WIREPROXY_CONFIG}
 Restart=always
-RestartSec=3
+RestartSec=5
 LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-sleep 2
-
 run_cmd "Reloading systemd" systemctl daemon-reload
 run_cmd "Enabling wireproxy service" systemctl enable wireproxy
 run_cmd "Starting wireproxy service" systemctl restart wireproxy
 
-sleep 4
+# -----------------------------------------------------
+# Connectivity Verification & Self-Healing Attempt
+# -----------------------------------------------------
+section_header "Verifying Connectivity & Tuning Handshake"
+printf "${BLUE}➜${RESET} Stabilizing tunnel connection ... "
+
+PASSED=false
+for i in {1..4}; do
+    TRACE_OUTPUT=$(curl -s --max-time 4 --socks5 127.0.0.1:"${SOCKS_PORT}" https://www.cloudflare.com/cdn-cgi/trace || echo "FAILED")
+    
+    if [[ "$TRACE_OUTPUT" != "FAILED" ]] && echo "$TRACE_OUTPUT" | grep -E -q "warp=(on|plus)"; then
+        PASSED=true
+        echo -e "${GREEN}Success!${RESET}"
+        break
+    else
+        systemctl restart wireproxy >/dev/null 2>&1
+        sleep 3
+    fi
+done
 
 # --------------------------
-# Verify Service
+# Final Status Validation
 # --------------------------
-if systemctl is-active --quiet wireproxy; then
-    success "wireproxy service is running"
+if [ "$PASSED" = true ] && systemctl is-active --quiet wireproxy; then
+    success "wireproxy is running and routing traffic safely through WARP!"
 else
-    error "wireproxy service failed to start"
-    echo
-    journalctl -u wireproxy --no-pager -n 50
+    echo -e "${RED}Failed${RESET}"
+    error "The connection verification failed or traffic could not pass through WARP."
+    warn "The handshake could not stabilize automatically."
+    info "You can check the latest wireproxy logs with: journalctl -u wireproxy -n 20"
     exit 1
 fi
 
@@ -464,33 +482,5 @@ printf "  ${YELLOW}systemctl restart wireproxy${RESET}\n"
 printf "  ${YELLOW}journalctl -u wireproxy -f${RESET}\n"
 echo
 line
-
-echo -e "${GREEN}Everything is ready.${RESET}"
+echo -e "${GREEN}Everything is fully operational and verified.${RESET}"
 echo
-
-# ---------------------------
-# Optional Connectivity Test
-# ---------------------------
-if command -v curl >/dev/null 2>&1; then
-    echo -e "${WHITE}${BOLD}Connectivity Test${RESET}"
-    read -rp "Would you like to test the WARP connection now? [Y/n]: " RUN_TEST </dev/tty
-    RUN_TEST=${RUN_TEST:-"Y"}
-
-    if [[ "$RUN_TEST" =~ ^[Yy]$ ]]; then
-        echo
-        printf "${BLUE}➜${RESET} Testing connection through SOCKS5 port ${SOCKS_PORT} ... "
-
-        TRACE_OUTPUT=$(curl -s --max-time 10 --socks5 127.0.0.1:"${SOCKS_PORT}" https://www.cloudflare.com/cdn-cgi/trace || echo "FAILED")
-
-        if [[ "$TRACE_OUTPUT" != "FAILED" ]] && echo "$TRACE_OUTPUT" | grep -E -q "warp=(on|plus)"; then
-            echo -e "${GREEN}Success!${RESET}\n"
-            success "WARP proxy is working perfectly and protecting your traffic."
-        else
-            echo -e "${RED}Failed!${RESET}\n"
-            error "The connection test failed or traffic is not passing through WARP."
-            warn "Please check your firewall rules and restart wireproxy service with: systemctl restart wireproxy."
-            info "You can also check the latest log enteries by: journalctl -u wireproxy -n 20"
-        fi
-        echo
-    fi
-fi
