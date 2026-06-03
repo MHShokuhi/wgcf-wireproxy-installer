@@ -20,8 +20,21 @@ BOLD='\033[1m'
 RESET='\033[0m'
 
 # --------------------------
-# UI Helpers
+# Step counter
 # --------------------------
+STEP=""
+
+cleanup() {
+    local exit_code=$?
+    if [[ ${exit_code} -ne 0 && -n "${STEP}" ]]; then
+        echo ""
+        echo -e "${RED}[ERROR] Failed during: ${STEP}${RESET}"
+        echo "Fix the structural issue and re-run the script."
+    fi
+    exit ${exit_code}
+}
+trap cleanup ERR
+
 clear_screen() {
     clear
 }
@@ -43,7 +56,7 @@ welcome_banner() {
     echo " ╚███╔███╔╝██║  ██║██║  ██║██║     "
     echo "  ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     "
     echo -e "${RESET}"
-    echo -e "${WHITE}${BOLD}WGCF + WireProxy Installer${RESET}"
+    echo -e "${WHITE}${BOLD} WGCF + WireProxy Installer${RESET}"
     line
     echo
 }
@@ -100,6 +113,7 @@ run_cmd() {
 # --------------------------
 # Root & Env Check
 # --------------------------
+STEP="Pre-flight validation checks"
 if [[ $EUID -ne 0 ]]; then
     error "Please run this script as root"
     exit 1
@@ -124,6 +138,9 @@ WIREPROXY_CONFIG="${CONFIG_DIR}/wireproxy.conf"
 WIREPROXY_BIN="/usr/local/bin/wireproxy"
 WGCF_BIN="/usr/local/bin/wgcf"
 SERVICE_FILE="/etc/systemd/system/wireproxy.service"
+WATCHER_SERVICE="/etc/systemd/system/wireproxy-watcher.service"
+WATCHER_TIMER="/etc/systemd/system/wireproxy-watcher.timer"
+HEALTH_CHECK_SCRIPT="${CONFIG_DIR}/wireproxy-watcher.sh"
 DEFAULT_PORT="40000"
 
 # --------------------------
@@ -164,8 +181,14 @@ if [[ -f "$SERVICE_FILE" ]] || [[ -f "$WIREPROXY_BIN" ]]; then
     echo
 
     if [[ "$CHOICE" == "2" ]]; then
+        STEP="Uninstalling software stack"
         section_header "Starting uninstallation process..."
         echo
+
+        if systemctl list-unit-files | grep -q "^wireproxy-watcher.timer"; then
+            run_cmd "Stopping watcher timer" systemctl stop wireproxy-watcher.timer || true
+            run_cmd "Disabling watcher timer" systemctl disable wireproxy-watcher.timer || true
+        fi
 
         if systemctl list-unit-files | grep -q "^wireproxy.service"; then
             run_cmd "Stopping wireproxy service" systemctl stop wireproxy || true
@@ -173,7 +196,7 @@ if [[ -f "$SERVICE_FILE" ]] || [[ -f "$WIREPROXY_BIN" ]]; then
         fi
 
         if [[ -f "$SERVICE_FILE" ]]; then
-            run_cmd "Removing systemd service file" rm -f "$SERVICE_FILE"
+            run_cmd "Removing systemd service files" rm -f "$SERVICE_FILE" "$WATCHER_SERVICE" "$WATCHER_TIMER"
             run_cmd "Reloading systemd daemon" systemctl daemon-reload
         fi
 
@@ -205,8 +228,8 @@ echo
 printf "  ${GREEN}✔${RESET} wgcf (unofficial, cross-platform CLI for Cloudflare Warp)\n"
 printf "  ${GREEN}✔${RESET} Free Cloudflare WARP account via wgcf\n"
 printf "  ${GREEN}✔${RESET} wireproxy (A wireguard client that exposes itself as a socks5/http proxy or tunnels)\n"
-printf "  ${GREEN}✔${RESET} SOCKS5 proxy via wireproxy\n"
-printf "  ${GREEN}✔${RESET} systemd auto-start service for wireproxy\n"
+printf "  ${GREEN}✔${RESET} SOCKS5 endpoint proxy routing layer via wireproxy\n"
+printf "  ${GREEN}✔${RESET} systemd auto-start service & tunnel health watcher\n"
 echo
 
 read -rp "Press ENTER to continue..." </dev/tty
@@ -233,6 +256,7 @@ echo
 # --------------------------
 # Install Dependencies
 # --------------------------
+STEP="Installing baseline dependencies (curl wget unzip tar ca-certificates ncurses-bin)"
 info "Installing dependencies"
 run_cmd "Updating package lists" apt update
 run_cmd "Installing essential packages" apt install -y curl wget unzip tar ca-certificates ncurses-bin
@@ -240,6 +264,7 @@ run_cmd "Installing essential packages" apt install -y curl wget unzip tar ca-ce
 # --------------------------
 # Install wgcf
 # --------------------------
+STEP="Fetching and deploying wgcf binaries"
 section_header "Installing wgcf"
 
 WGCF_VERSION=$(curl -fsSL https://api.github.com/repos/ViRb3/wgcf/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1 | tr -d 'v')
@@ -267,6 +292,7 @@ cd "$CONFIG_DIR"
 # --------------------------
 # Register WARP Account
 # --------------------------
+STEP="Registering WARP account via wgcf"
 section_header "Setting up Cloudflare WARP account"
 
 NEW_REGISTRATION=false
@@ -303,6 +329,7 @@ fi
 # --------------------------
 # Generate Profile
 # --------------------------
+STEP="Generating wgcf profile"
 section_header "Generating WireGuard profile"
 
 rm -f wgcf-profile.conf
@@ -318,6 +345,7 @@ success "WireGuard profile generated"
 # --------------------------
 # Install wireproxy
 # --------------------------
+STEP="Checking, fetching and deploying wireproxy binaries & service"
 section_header "Installing wireproxy"
 
 if systemctl list-unit-files | grep -q "^wireproxy.service"; then
@@ -373,6 +401,7 @@ fi
 # --------------------------
 # Create wireproxy Config
 # --------------------------
+STEP="Creating wireproxy backend config"
 section_header "Creating IPv4-only wireproxy config"
 
 cat > "$WIREPROXY_CONFIG" <<EOF
@@ -392,11 +421,27 @@ PersistentKeepalive = 25
 BindAddress = 127.0.0.1:${SOCKS_PORT}
 EOF
 
+chmod 600 "$WIREPROXY_CONFIG"
 success "wireproxy config created"
+
+# --------------------------
+# Create Internal Watcher Script & Self-Healing
+# --------------------------
+STEP="Generating health watcher & auto-healing loops"
+cat > "$HEALTH_CHECK_SCRIPT" <<EOF
+#!/usr/bin/env bash
+SOCKS_PORT="${SOCKS_PORT}"
+if ! curl -s --max-time 5 --socks5 127.0.0.1:"\$SOCKS_PORT" https://www.cloudflare.com/cdn-cgi/trace | grep -E -q "warp=(on|plus)" >/dev/null 2>&1; then
+    systemctl restart wireproxy >/dev/null 2>&1
+fi
+EOF
+
+chmod +x "$HEALTH_CHECK_SCRIPT"
 
 # --------------------------
 # Create systemd Service
 # --------------------------
+STEP="Deploying systemd background services"
 section_header "Creating systemd service"
 
 if ! "${WIREPROXY_BIN}" -c "${WIREPROXY_CONFIG}" -n >/dev/null 2>&1; then
@@ -421,40 +466,63 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 
+cat > "$WATCHER_SERVICE" <<EOF
+[Unit]
+Description=wireproxy Health Watcher Worker
+After=wireproxy.service
+
+[Service]
+Type=oneshot
+ExecStart=${HEALTH_CHECK_SCRIPT}
+EOF
+
+cat > "$WATCHER_TIMER" <<EOF
+[Unit]
+Description=Run wireproxy Health Watcher every minute
+
+[Timer]
+OnActiveSec=30
+OnUnitActiveSec=60
+
+[Install]
+WantedBy=timers.target
+EOF
+
 run_cmd "Reloading systemd" systemctl daemon-reload
 run_cmd "Enabling wireproxy service" systemctl enable wireproxy
-run_cmd "Starting wireproxy service" systemctl restart wireproxy
-
-# -----------------------------------------------------
-# Connectivity Verification & Self-Healing Attempt
-# -----------------------------------------------------
-section_header "Verifying Connectivity & Tuning Handshake"
-printf "${BLUE}➜${RESET} Stabilizing tunnel connection ... "
-
-PASSED=false
-for i in {1..4}; do
-    TRACE_OUTPUT=$(curl -s --max-time 4 --socks5 127.0.0.1:"${SOCKS_PORT}" https://www.cloudflare.com/cdn-cgi/trace || echo "FAILED")
-    
-    if [[ "$TRACE_OUTPUT" != "FAILED" ]] && echo "$TRACE_OUTPUT" | grep -E -q "warp=(on|plus)"; then
-        PASSED=true
-        echo -e "${GREEN}Success!${RESET}"
-        break
-    else
-        systemctl restart wireproxy >/dev/null 2>&1
-        sleep 3
-    fi
-done
+run_cmd "Enabling watcher timer" systemctl enable wireproxy-watcher.timer
 
 # --------------------------
 # Final Status Validation
 # --------------------------
-if [ "$PASSED" = true ] && systemctl is-active --quiet wireproxy; then
-    success "wireproxy is running and routing traffic safely through WARP!"
+STEP="Verifying tunnel startup state and condition"
+section_header "Starting and Tuning Tunnel Stabilization Link"
+
+printf "${BLUE}➜${RESET} Synchronizing proxy socket interfaces ... "
+
+systemctl stop wireproxy >/dev/null 2>&1 || true
+systemctl start wireproxy
+
+# Let the interface settle and allow first-time routing keys to populate down
+sleep 5
+
+# Systematic validation verification sequence
+VALIDATED=false
+for i in {1..6}; do
+    if curl -s --max-time 4 --socks5 127.0.0.1:"${SOCKS_PORT}" https://www.cloudflare.com/cdn-cgi/trace | grep -E -q "warp=(on|plus)" >/dev/null 2>&1; then
+        VALIDATED=true
+        break
+    fi
+    sleep 3
+done
+
+if [ "$VALIDATED" = true ]; then
+    systemctl start wireproxy-watcher.timer >/dev/null 2>&1 || true
+    echo -e "${GREEN}Connected & Fully Stabilized!${RESET}"
 else
-    echo -e "${RED}Failed${RESET}"
-    error "The connection verification failed or traffic could not pass through WARP."
-    warn "The handshake could not stabilize automatically."
-    info "You can check the latest wireproxy logs with: journalctl -u wireproxy -n 20"
+    echo -e "${RED}Verification Stalled${RESET}"
+    error "The connection handshake failed to verify connection."
+    info "Review latest logs via: journalctl -u wireproxy -n 25"
     exit 1
 fi
 
@@ -475,7 +543,7 @@ printf "  ${CYAN}Protocol:${RESET} SOCKS5\n"
 echo
 line
 
-echo -e "${WHITE}${BOLD}Useful Commands${RESET}"
+echo -e "${WHITE}${BOLD}Useful Management Commands${RESET}"
 echo
 printf "  ${YELLOW}systemctl status wireproxy${RESET}\n"
 printf "  ${YELLOW}systemctl restart wireproxy${RESET}\n"
@@ -484,3 +552,4 @@ echo
 line
 echo -e "${GREEN}Everything is fully operational and verified.${RESET}"
 echo
+STEP=""
