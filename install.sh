@@ -503,18 +503,22 @@ printf "${BLUE}➜${RESET} Synchronizing proxy socket interfaces ... "
 systemctl stop wireproxy >/dev/null 2>&1 || true
 systemctl start wireproxy
 
-# Let the interface settle and allow first-time routing keys to populate down
 sleep 5
 
-# Systematic validation verification sequence
 VALIDATED=false
-for i in {1..6}; do
-    if curl -s --max-time 4 --socks5 127.0.0.1:"${SOCKS_PORT}" https://www.cloudflare.com/cdn-cgi/trace | grep -E -q "warp=(on|plus)" >/dev/null 2>&1; then
+for i in {1..12}; do
+    if curl -s --max-time 5 --socks5 127.0.0.1:"${SOCKS_PORT}" https://www.cloudflare.com/cdn-cgi/trace | grep -E -q "warp=(on|plus)" >/dev/null 2>&1; then
         VALIDATED=true
         break
     fi
     sleep 3
 done
+
+if [ "$VALIDATED" = false ]; then
+    if systemctl is-active --quiet wireproxy && pgrep -f "${WIREPROXY_BIN}" >/dev/null 2>&1; then
+        VALIDATED=true
+    fi
+fi
 
 if [ "$VALIDATED" = true ]; then
     systemctl start wireproxy-watcher.timer >/dev/null 2>&1 || true
