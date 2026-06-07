@@ -422,6 +422,7 @@ BindAddress = 127.0.0.1:${SOCKS_PORT}
 EOF
 
 chmod 600 "$WIREPROXY_CONFIG"
+chown nobody:nogroup "$WIREPROXY_CONFIG"
 success "wireproxy config created"
 
 # --------------------------
@@ -454,12 +455,15 @@ cat > "$SERVICE_FILE" <<EOF
 Description=wireproxy WARP connection
 After=network.target network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+User=nobody
+NoNewPrivileges=true
 ExecStart=${WIREPROXY_BIN} -c ${WIREPROXY_CONFIG}
 Restart=always
-RestartSec=5
+RestartSec=2
 LimitNOFILE=1048576
 
 [Install]
