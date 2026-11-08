@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 
 set -euo pipefail
@@ -432,11 +433,11 @@ info "Latest WGCF version: v${WGCF_VERSION}"
 
 WGCF_URL="https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VERSION}/wgcf_${WGCF_VERSION}_linux_${WGCF_ARCH}"
 
-run_cmd "Preparing WGCF binary" \
-    install -m 0755 "${TMP_DIR}/wgcf" "${WGCF_BIN}.new"
+run_cmd "Downloading WGCF" \
+    wget -q -O "${TMP_DIR}/wgcf" "$WGCF_URL"
 
-run_cmd "Deploying WGCF binary" \
-    mv -f "${WGCF_BIN}.new" "$WGCF_BIN"
+run_cmd "Installing WGCF binary" \
+    install -m 0755 "${TMP_DIR}/wgcf" "$WGCF_BIN"
 
 success "WGCF installed."
 
@@ -563,11 +564,12 @@ if [[ -z "$WIREPROXY_FOUND" ]]; then
     exit 1
 fi
 
-run_cmd "Preparing WireProxy binary" \
-    install -m 0755 "$WIREPROXY_FOUND" "${WIREPROXY_BIN}.new"
+run_cmd "Installing WireProxy binary" \
+    install -m 0755 "$WIREPROXY_FOUND" "${TMP_DIR}/wireproxy.new"
 
+# Atomic replacement: the previous binary remains intact if installation fails.
 run_cmd "Deploying WireProxy binary" \
-    mv -f "${WIREPROXY_BIN}.new" "$WIREPROXY_BIN"
+    mv -f "${TMP_DIR}/wireproxy.new" "$WIREPROXY_BIN"
 
 success "WireProxy installed."
 
