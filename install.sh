@@ -390,7 +390,7 @@ section_header "Installing dependencies"
 run_cmd "Updating package lists" apt update
 
 run_cmd "Installing essential packages" \
-    apt install -y curl wget unzip tar ca-certificates ncurses-bin
+    apt install -y curl wget unzip tar ca-certificates ncurses-bin file
 
 # --------------------------
 # Prepare temporary directory
@@ -432,11 +432,29 @@ info "Latest WGCF version: v${WGCF_VERSION}"
 
 WGCF_URL="https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VERSION}/wgcf_${WGCF_VERSION}_linux_${WGCF_ARCH}"
 
+# Download
 run_cmd "Downloading WGCF" \
     wget -q -O "${TMP_DIR}/wgcf" "$WGCF_URL"
 
-run_cmd "Installing WGCF binary" \
-    install -m 0755 "${TMP_DIR}/wgcf" "$WGCF_BIN"
+# Verify download
+if [[ ! -s "${TMP_DIR}/wgcf" ]]; then
+    error "WGCF download failed or produced an empty file."
+    exit 1
+fi
+
+# Verify executable format
+if ! file "${TMP_DIR}/wgcf" | grep -q 'ELF'; then
+    error "Downloaded WGCF file is not a valid Linux executable."
+    exit 1
+fi
+
+# Stage binary beside destination for atomic replacement
+run_cmd "Preparing WGCF binary" \
+    install -m 0755 "${TMP_DIR}/wgcf" "${WGCF_BIN}.new"
+
+# Atomic deployment
+run_cmd "Deploying WGCF binary" \
+    mv -f "${WGCF_BIN}.new" "$WGCF_BIN"
 
 success "WGCF installed."
 
